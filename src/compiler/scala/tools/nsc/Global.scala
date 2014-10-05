@@ -842,6 +842,119 @@ class Global(var currentSettings: Settings, var reporter: Reporter)
     } reverse
   }
 
+  protected def mergePathsIntoClassPath(platform: JavaPlatform, paths: String*): MergedClassPath[AbstractFile] = {
+    // Collect our new jars/directories and add them to the existing set of classpaths
+    val allClassPaths = (
+      /*platform.classPath.asInstanceOf[MergedClassPath[AbstractFile]].entries ++*/
+      paths.map(path => {
+        platform.classPath.context.newClassPath({
+          val f = new File(path)
+          if (f.isDirectory) io.AbstractFile.getDirectory(f)
+          else io.AbstractFile.getFile(f)
+        })
+      })
+    ).distinct
+
+    // Combine all of our classpaths (old and new) into one merged classpath
+    new MergedClassPath(allClassPaths, platform.classPath.context)
+  }
+
+  /** Re-syncs symbol table with classpath
+   *  @param root         The root symbol to be resynced (a package class)
+   *  @param newEntries   Optionally, the corresponding package in the new classPath entries
+   */
+  private def reSync(root: ClassSymbol,
+                     allEntries: OptClassPath,
+                     newEntries: OptClassPath): Unit = {
+
+    val getName: ClassPath[AbstractFile] => String = (_.name)
+
+    println(s"classes in newEntries: ${newEntries.get.classes}")
+
+    def hasClasses(cp: OptClassPath) = cp.isDefined && cp.get.classes.nonEmpty
+
+    def invalidateOrRemove(root: ClassSymbol) = {
+      allEntries match {
+        case Some(cp) => root setInfo new loaders.PackageLoader(cp)
+        case None => root.owner.info.decls unlink root.sourceModule
+      }
+    }
+
+    def packageNames(cp: PlatformClassPath): Set[String] = cp.packages.toSet map getName
+    def subPackage(cp: PlatformClassPath, name: String): OptClassPath =
+      cp.packages find (cp1 => getName(cp1) == name)
+
+    // if (hasClasses(newEntries)) {
+      invalidateOrRemove(EmptyPackageClass)
+      invalidateOrRemove(root)
+
+      val pkgNames = packageNames(newEntries.get)
+      println(s"packages: $pkgNames")
+
+      for (pstr <- pkgNames) {
+        val pname = newTermName(pstr)
+        val pkg = (root.info decl pname) orElse {
+          // package was created by external agent, create symbol to track it
+          println(s"enter package $pstr")
+          loaders.enterPackage(root, pstr, new loaders.PackageLoader(allEntries.get))
+        }
+        val subNewEntries = subPackage(newEntries.get, pstr)
+        println(s"calling resync recursively with new entries: $subNewEntries")
+        reSync(
+            pkg.moduleClass.asInstanceOf[ClassSymbol],
+            subPackage(allEntries.get, pstr), subNewEntries)
+      }
+    // }
+
+  }
+
+  def addClasspathEntries(paths: String*): Either[List[String], PlatformClassPath] = {
+    classPath match {
+      case cp: MergedClassPath[_] =>
+        val conflictingPaths = paths.flatMap { path =>
+          val dir = AbstractFile getDirectory path
+          val canonical = dir.canonicalPath
+          def matchesCanonical(e: ClassPath[_]) = e.origin match {
+            case Some(opath) =>
+              (AbstractFile getDirectory opath).canonicalPath == canonical
+            case None =>
+              false
+          }
+          cp.entries find matchesCanonical match {
+            case Some(oldEntry) =>
+              // conflicting entry already exists
+              List(path)
+            case None =>
+              List()
+          }
+        }
+
+        if (conflictingPaths.nonEmpty) Left(conflictingPaths.toList)
+        else {
+          // there were no conflicts
+          val javaPlatform = platform.asInstanceOf[JavaPlatform]
+
+          // note: `newClassPath` does not contain `classPath`!
+          val newClassPath = mergePathsIntoClassPath(javaPlatform, paths: _*)
+          println(s"newClassPath: $newClassPath")
+
+          // merge `newClassPath` and `classPath`
+          val completeClassPath = {
+            val allEntries =
+              platform.classPath.asInstanceOf[MergedClassPath[AbstractFile]].entries ++ newClassPath.entries
+            new MergedClassPath(allEntries, platform.classPath.context)
+          }
+          println(s"completeClassPath: $completeClassPath")
+
+          javaPlatform.currentClassPath = Some(completeClassPath)
+
+          reSync(RootClass, Some(completeClassPath), Some(newClassPath))
+
+          Right(completeClassPath)
+        }
+    }
+  }
+
   // ----------- Runs ---------------------------------------
 
   private var curRun: Run = null

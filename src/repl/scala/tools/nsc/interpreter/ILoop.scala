@@ -620,6 +620,7 @@ class ILoop(in0: Option[BufferedReader], protected val out: JPrintWriter)
   )
 
   def addClasspath(arg: String): Unit = {
+    /*
     val f = File(arg).normalize
     if (f.exists) {
       addedClasspath = ClassPath.join(addedClasspath, f.path)
@@ -628,6 +629,19 @@ class ILoop(in0: Option[BufferedReader], protected val out: JPrintWriter)
       replay()
     }
     else echo("The path '" + f + "' doesn't seem to exist.")
+    */
+
+    intp.global.addClasspathEntries(arg) match {
+      case Left(conflictingEntries) =>
+        echo(s"Classpath not extended due to conflicting entries: ${conflictingEntries.mkString(", ")}")
+      case Right(completeClassPath) =>
+        echo(s"Successfully added entry to classpath. New classpath: $completeClassPath")
+    }
+
+    // val g = intp.global
+    // new g.Run() // init stuff
+
+    // echo("Here comes the stuff.")
   }
 
   def powerCmd(): Result = {
